@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-转换任务主页面 (ConvertPage)
-整合文件拖拽导入、文件队列管理、数据即时预览、实时进度、KPI 指标与结果导出操作
+转换任务工作区 (ConvertPage)
+极简、高效、现代 Windows 11 Fluent 布局:
+1. 醒目主操作栏: 「添加文件」「开始转换」首屏直达
+2. 单行紧凑输出目录与状态标识，内置模板零打扰就绪
+3. 紧凑型文件队列与拖拽导入条
+4. 单行状态与实时统计条，摒弃臃肿卡片
+5. 宽敞居中的核心数据预览区，支持非阻塞异步加载与精准状态区分
 """
 
 import os
-import subprocess
-import sys
 from typing import List, Dict, Optional
 
 from PySide6.QtCore import Qt, QUrl, Slot
@@ -22,19 +25,17 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFileDialog,
     QProgressBar,
-    QSplitter,
     QMessageBox,
-    QTextEdit,
     QAbstractItemView,
+    QFrame,
 )
 
-from gui.components.card import CardWidget
+from gui.icons import get_icon
 from gui.components.drop_area import FileDropWidget
-from gui.components.metric_card import MetricCard
 from gui.components.data_table import PreviewTableWidget
 from core.template_manager import ConfigManager, TemplateManager
-from core.worker import ConversionWorker
-from map_link_converter import TableReader, Record
+from core.worker import ConversionWorker, PreviewWorker
+from map_link_converter import Record
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -48,197 +49,192 @@ def format_file_size(size_bytes: int) -> str:
 
 
 class ConvertPage(QWidget):
-    """主转换任务页面"""
+    """主转换任务工作区"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.file_list: List[str] = []
         self.file_records_cache: Dict[str, List[Record]] = {}
+        self.file_converted_cache: Dict[str, bool] = {}  # 记录是否已完成转换导出
         self.worker: Optional[ConversionWorker] = None
+        self.preview_worker: Optional[PreviewWorker] = None
         self.last_summary: Optional[dict] = None
+        self.output_dir: str = ""
 
         self._init_ui()
         self._load_default_output_dir()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(18, 16, 18, 16)
+        main_layout.setSpacing(12)
 
-        # 1. 顶部操作栏: 标题、模板状态标识与输出路径
-        top_bar = QHBoxLayout()
-        top_bar.setSpacing(12)
+        # ================= 1. 顶部醒目主操作栏 =================
+        action_bar = QHBoxLayout()
+        action_bar.setSpacing(10)
 
-        page_title_layout = QVBoxLayout()
-        page_title_layout.setSpacing(2)
-        title_lbl = QLabel("批量位置转换")
-        title_lbl.setProperty("class", "page-title")
-        sub_title_lbl = QLabel("拖拽源表直接转换，已内置官方 GCJ-02 地图导入规范模板")
-        sub_title_lbl.setProperty("class", "page-subtitle")
-        page_title_layout.addWidget(title_lbl)
-        page_title_layout.addWidget(sub_title_lbl)
-        top_bar.addLayout(page_title_layout, 1)
+        # 主操作 1: 添加文件
+        self.btn_add_files = QPushButton("添加文件")
+        self.btn_add_files.setIcon(get_icon("file-plus", "#1F2937", 16))
+        self.btn_add_files.setProperty("class", "btn-secondary")
+        self.btn_add_files.setCursor(Qt.PointingHandCursor)
+        self.btn_add_files.setMinimumHeight(34)
+        self.btn_add_files.clicked.connect(self._browse_add_files)
+        action_bar.addWidget(self.btn_add_files)
 
-        # 模板状态标签
-        self.template_badge = QLabel("  内置模板就绪  ")
-        self.template_badge.setStyleSheet(
-            "background-color: #DCFCE7; color: #15803D; font-size: 12px; font-weight: 600; "
-            "padding: 6px 12px; border-radius: 6px;"
-        )
-        top_bar.addWidget(self.template_badge)
+        # 主操作 2: 开始批量转换 (Fluent Primary Accent)
+        self.btn_start = QPushButton("开始转换")
+        self.btn_start.setIcon(get_icon("play", "#FFFFFF", 16))
+        self.btn_start.setProperty("class", "btn-primary")
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.setMinimumHeight(34)
+        self.btn_start.clicked.connect(self.start_conversion)
+        action_bar.addWidget(self.btn_start)
 
-        main_layout.addLayout(top_bar)
+        action_bar.addSpacing(6)
 
-        # 2. 中部垂直分割器: 上部文件管理与转换控制，下部数据预览表
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setHandleWidth(8)
+        # 单行输出目录设置
+        out_lbl = QLabel("导出至:")
+        out_lbl.setStyleSheet("color: #64748B; font-weight: 500; font-size: 12px;")
+        action_bar.addWidget(out_lbl)
 
-        # ================= 上部控制容器 =================
-        top_container = QWidget()
-        top_container_layout = QHBoxLayout(top_container)
-        top_container_layout.setContentsMargins(0, 0, 0, 0)
-        top_container_layout.setSpacing(16)
+        self.out_dir_lbl = QLabel("./导出结果")
+        self.out_dir_lbl.setProperty("class", "path-box")
+        self.out_dir_lbl.setMaximumWidth(280)
+        action_bar.addWidget(self.out_dir_lbl)
 
-        # 左侧: 文件导入与队列卡片
-        file_card = CardWidget("待转换文件列表", "支持多文件批量处理，点击文件行可预览点位")
-        file_card_layout = QVBoxLayout()
-        file_card_layout.setSpacing(10)
+        self.btn_choose_out = QPushButton("更改")
+        self.btn_choose_out.setProperty("class", "btn-secondary")
+        self.btn_choose_out.setCursor(Qt.PointingHandCursor)
+        self.btn_choose_out.setToolTip("选择导出结果保存目录")
+        self.btn_choose_out.clicked.connect(self._choose_output_dir)
+        action_bar.addWidget(self.btn_choose_out)
 
-        # 拖拽区域
+        action_bar.addStretch()
+
+        # 转换完成后的快捷操作
+        self.btn_open_out_dir = QPushButton("打开导出目录")
+        self.btn_open_out_dir.setIcon(get_icon("folder-open", "#374151", 15))
+        self.btn_open_out_dir.setProperty("class", "btn-secondary")
+        self.btn_open_out_dir.setCursor(Qt.PointingHandCursor)
+        self.btn_open_out_dir.setVisible(False)
+        self.btn_open_out_dir.clicked.connect(self.open_output_dir)
+        action_bar.addWidget(self.btn_open_out_dir)
+
+        self.btn_open_pending = QPushButton("查看待处理明细")
+        self.btn_open_pending.setIcon(get_icon("list", "#B45309", 15))
+        self.btn_open_pending.setProperty("class", "btn-secondary")
+        self.btn_open_pending.setCursor(Qt.PointingHandCursor)
+        self.btn_open_pending.setVisible(False)
+        self.btn_open_pending.clicked.connect(self.open_pending_file)
+        action_bar.addWidget(self.btn_open_pending)
+
+        # 模板状态小型药丸徽章
+        self.template_badge = QLabel("内置模板就绪")
+        self.template_badge.setProperty("class", "badge-success")
+        self.template_badge.setToolTip("已内置官方 GCJ-02 模板规范，正常使用无需手动导入")
+        action_bar.addWidget(self.template_badge)
+
+        main_layout.addLayout(action_bar)
+
+        # ================= 2. 紧凑型文件队列与拖拽导入栏 =================
+        file_strip_frame = QFrame()
+        file_strip_frame.setProperty("class", "fluent-card")
+        file_strip_layout = QHBoxLayout(file_strip_frame)
+        file_strip_layout.setContentsMargins(10, 8, 10, 8)
+        file_strip_layout.setSpacing(12)
+
+        # 左侧: 紧凑拖拽导入条
         self.drop_widget = FileDropWidget()
+        self.drop_widget.setFixedWidth(230)
         self.drop_widget.files_selected.connect(self.add_files)
-        file_card_layout.addWidget(self.drop_widget)
+        file_strip_layout.addWidget(self.drop_widget)
 
-        # 文件列表表格
+        # 右侧: 紧凑文件列表 (高度适中，完整呈现长文件名)
+        file_table_container = QVBoxLayout()
+        file_table_container.setSpacing(4)
+
+        table_header_bar = QHBoxLayout()
+        self.file_queue_title = QLabel("待处理文件 (0)")
+        self.file_queue_title.setStyleSheet("font-size: 12px; font-weight: 600;")
+        table_header_bar.addWidget(self.file_queue_title)
+
+        table_header_bar.addStretch()
+
+        self.btn_clear_files = QPushButton("清空")
+        self.btn_clear_files.setIcon(get_icon("trash", "#94A3B8", 13))
+        self.btn_clear_files.setProperty("class", "btn-ghost")
+        self.btn_clear_files.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_files.setToolTip("清空待处理文件列表")
+        self.btn_clear_files.clicked.connect(self.clear_files)
+        table_header_bar.addWidget(self.btn_clear_files)
+
+        file_table_container.addLayout(table_header_bar)
+
         self.file_table = QTableWidget()
+        self.file_table.setFixedHeight(82)
         self.file_table.setColumnCount(4)
-        self.file_table.setHorizontalHeaderLabels(["文件名", "大小", "状态", "操作"])
+        self.file_table.setHorizontalHeaderLabels(["文件名", "大小", "状态", "移除"])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.file_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.file_table.setShowGrid(False)
         self.file_table.setAlternatingRowColors(True)
-        self.file_table.horizontalHeader().setStretchLastSection(False)
-        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.file_table.setColumnWidth(1, 80)
-        self.file_table.setColumnWidth(2, 90)
-        self.file_table.setColumnWidth(3, 60)
+        self.file_table.verticalHeader().setVisible(False)
+
+        f_header = self.file_table.horizontalHeader()
+        f_header.setHighlightSections(False)
+        f_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        self.file_table.setColumnWidth(1, 75)
+        self.file_table.setColumnWidth(2, 85)
+        self.file_table.setColumnWidth(3, 45)
         self.file_table.cellClicked.connect(self._on_file_selected)
 
-        file_card_layout.addWidget(self.file_table)
+        file_table_container.addWidget(self.file_table)
+        file_strip_layout.addLayout(file_table_container, 1)
 
-        # 文件卡片底部操作按钮
-        file_btn_bar = QHBoxLayout()
-        self.btn_add_files = QPushButton("＋ 添加文件")
-        self.btn_add_files.setProperty("class", "btn-secondary")
-        self.btn_add_files.clicked.connect(self._browse_add_files)
-        file_btn_bar.addWidget(self.btn_add_files)
+        main_layout.addWidget(file_strip_frame)
 
-        self.btn_clear_files = QPushButton("清空列表")
-        self.btn_clear_files.setProperty("class", "btn-secondary")
-        self.btn_clear_files.clicked.connect(self.clear_files)
-        file_btn_bar.addWidget(self.btn_clear_files)
+        # ================= 3. 单行状态与实时统计条 =================
+        status_bar = QHBoxLayout()
+        status_bar.setSpacing(10)
 
-        file_btn_bar.addStretch()
-        file_card_layout.addLayout(file_btn_bar)
+        self.stats_summary_lbl = QLabel("就绪: 支持拖拽或添加 Excel 表格 (.xlsx / .xls)")
+        self.stats_summary_lbl.setStyleSheet("font-size: 12px; color: #64748B;")
+        status_bar.addWidget(self.stats_summary_lbl, 1)
 
-        file_card.set_content_layout(file_card_layout)
-        top_container_layout.addWidget(file_card, 6)
-
-        # 右侧: 执行控制与状态卡片
-        action_card = CardWidget("转换配置与操作", "设置结果输出位置并启动全自动解析流程")
-        action_card_layout = QVBoxLayout()
-        action_card_layout.setSpacing(14)
-
-        # 输出目录选择
-        out_box_layout = QVBoxLayout()
-        out_box_layout.setSpacing(6)
-        out_lbl = QLabel("导出结果保存目录:")
-        out_lbl.setProperty("class", "field-label")
-        out_box_layout.addWidget(out_lbl)
-
-        out_select_bar = QHBoxLayout()
-        self.out_dir_lbl = QLabel("./导出结果")
-        self.out_dir_lbl.setProperty("class", "path-display")
-        out_select_bar.addWidget(self.out_dir_lbl, 1)
-
-        self.btn_choose_out = QPushButton("更改目录")
-        self.btn_choose_out.setProperty("class", "btn-secondary")
-        self.btn_choose_out.clicked.connect(self._choose_output_dir)
-        out_select_bar.addWidget(self.btn_choose_out)
-
-        out_box_layout.addLayout(out_select_bar)
-        action_card_layout.addLayout(out_box_layout)
-
-        # KPI 指标统计格
-        metric_layout = QHBoxLayout()
-        metric_layout.setSpacing(8)
-        self.metric_files = MetricCard("待处理文件", "0", "📁", "#0066CC")
-        self.metric_total = MetricCard("总识别点位", "0", "📍", "#0F172A")
-        self.metric_success = MetricCard("成功导入", "0", "✅", "#15803D")
-        self.metric_pending = MetricCard("待处理项", "0", "⚠️", "#B45309")
-        metric_layout.addWidget(self.metric_files)
-        metric_layout.addWidget(self.metric_total)
-        metric_layout.addWidget(self.metric_success)
-        metric_layout.addWidget(self.metric_pending)
-        action_card_layout.addLayout(metric_layout)
-
-        # 进度条
         self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(5)
+        self.progress_bar.setFixedWidth(200)
         self.progress_bar.setVisible(False)
-        action_card_layout.addWidget(self.progress_bar)
+        status_bar.addWidget(self.progress_bar)
 
-        self.status_tip_lbl = QLabel("准备就绪，请添加待转换文件后点击开始")
-        self.status_tip_lbl.setStyleSheet("font-size: 12px; color: #64748B;")
-        action_card_layout.addWidget(self.status_tip_lbl)
+        main_layout.addLayout(status_bar)
 
-        # 主操作按钮
-        self.btn_start = QPushButton("▶ 开始批量转换")
-        self.btn_start.setProperty("class", "btn-primary")
-        self.btn_start.setMinimumHeight(42)
-        self.btn_start.setStyleSheet("font-size: 14px; font-weight: 700;")
-        self.btn_start.clicked.connect(self.start_conversion)
-        action_card_layout.addWidget(self.btn_start)
+        # ================= 4. 宽敞居中的核心数据预览区 =================
+        preview_frame = QFrame()
+        preview_frame.setProperty("class", "fluent-card")
+        preview_layout = QVBoxLayout(preview_frame)
+        preview_layout.setContentsMargins(12, 10, 12, 10)
+        preview_layout.setSpacing(8)
 
-        # 完成后的操作按钮组 (默认隐藏)
-        self.finish_actions_widget = QWidget()
-        finish_layout = QHBoxLayout(self.finish_actions_widget)
-        finish_layout.setContentsMargins(0, 0, 0, 0)
-        finish_layout.setSpacing(8)
+        # 预览区标题与当前文件名
+        preview_header = QHBoxLayout()
+        preview_title = QLabel("数据预览与核验")
+        preview_title.setStyleSheet("font-size: 13px; font-weight: 600;")
+        preview_header.addWidget(preview_title)
 
-        self.btn_open_out_dir = QPushButton("📂 打开导出目录")
-        self.btn_open_out_dir.setProperty("class", "btn-secondary")
-        self.btn_open_out_dir.clicked.connect(self.open_output_dir)
-        finish_layout.addWidget(self.btn_open_out_dir)
+        self.preview_current_file_lbl = QLabel("未选择文件")
+        self.preview_current_file_lbl.setStyleSheet("font-size: 12px; color: #94A3B8;")
+        preview_header.addWidget(self.preview_current_file_lbl)
+        preview_header.addStretch()
 
-        self.btn_open_pending = QPushButton("📋 查看待处理明细")
-        self.btn_open_pending.setProperty("class", "btn-secondary")
-        self.btn_open_pending.clicked.connect(self.open_pending_file)
-        finish_layout.addWidget(self.btn_open_pending)
+        preview_layout.addLayout(preview_header)
 
-        action_card_layout.addWidget(self.finish_actions_widget)
-        self.finish_actions_widget.setVisible(False)
-
-        action_card_layout.addStretch()
-        action_card.set_content_layout(action_card_layout)
-        top_container_layout.addWidget(action_card, 5)
-
-        splitter.addWidget(top_container)
-
-        # ================= 下部数据预览表 =================
-        preview_card = CardWidget("点位数据预览", "选中左侧列表文件即可提前核验解析结果，支持关键词搜索与状态筛选")
-        preview_card_layout = QVBoxLayout()
-        preview_card_layout.setSpacing(8)
-
+        # 数据预览表
         self.preview_table = PreviewTableWidget()
-        preview_card_layout.addWidget(self.preview_table)
+        preview_layout.addWidget(self.preview_table)
 
-        preview_card.set_content_layout(preview_card_layout)
-        splitter.addWidget(preview_card)
-
-        # 分割器初始比例
-        splitter.setSizes([340, 380])
-        main_layout.addWidget(splitter, 1)
+        main_layout.addWidget(preview_frame, 1)
 
     def _load_default_output_dir(self):
         cfg = ConfigManager.load()
@@ -247,7 +243,7 @@ class ConvertPage(QWidget):
             self.output_dir = saved_dir
         else:
             self.output_dir = os.path.abspath("./导出结果")
-        self.out_dir_lbl.setText(self.output_dir)
+        self.out_dir_lbl.setText(os.path.basename(self.output_dir) or self.output_dir)
         self.out_dir_lbl.setToolTip(self.output_dir)
 
     def _choose_output_dir(self):
@@ -256,7 +252,7 @@ class ConvertPage(QWidget):
         )
         if chosen:
             self.output_dir = os.path.abspath(chosen)
-            self.out_dir_lbl.setText(self.output_dir)
+            self.out_dir_lbl.setText(os.path.basename(self.output_dir) or self.output_dir)
             self.out_dir_lbl.setToolTip(self.output_dir)
             cfg = ConfigManager.load()
             cfg["default_output_dir"] = self.output_dir
@@ -271,7 +267,7 @@ class ConvertPage(QWidget):
 
     @Slot(list)
     def add_files(self, paths: List[str]):
-        """添加文件到列表，自动过滤重复项"""
+        """添加文件到列表，自动过滤重复文件"""
         added_count = 0
         for p in paths:
             abs_p = os.path.abspath(p)
@@ -289,19 +285,19 @@ class ConvertPage(QWidget):
     def clear_files(self):
         self.file_list = []
         self.file_records_cache = {}
+        self.file_converted_cache = {}
         self.file_table.setRowCount(0)
         self.preview_table.clear_records()
-        self.metric_files.set_value("0")
-        self.metric_total.set_value("0")
-        self.metric_success.set_value("0")
-        self.metric_pending.set_value("0")
+        self.file_queue_title.setText("待处理文件 (0)")
+        self.preview_current_file_lbl.setText("未选择文件")
         self.progress_bar.setVisible(False)
-        self.finish_actions_widget.setVisible(False)
-        self.status_tip_lbl.setText("准备就绪，请添加待转换文件后点击开始")
+        self.btn_open_out_dir.setVisible(False)
+        self.btn_open_pending.setVisible(False)
+        self.stats_summary_lbl.setText("就绪: 支持拖拽或添加 Excel 表格 (.xlsx / .xls)")
 
     def _refresh_file_table(self):
         self.file_table.setRowCount(len(self.file_list))
-        self.metric_files.set_value(str(len(self.file_list)))
+        self.file_queue_title.setText(f"待处理文件 ({len(self.file_list)})")
 
         for r_idx, fpath in enumerate(self.file_list):
             bname = os.path.basename(fpath)
@@ -310,26 +306,30 @@ class ConvertPage(QWidget):
             except Exception:
                 fsize = "未知"
 
-            # 文件名
+            # 0: 文件名
             item_name = QTableWidgetItem(bname)
             item_name.setToolTip(fpath)
             self.file_table.setItem(r_idx, 0, item_name)
 
-            # 大小
+            # 1: 大小
             item_size = QTableWidgetItem(fsize)
             item_size.setTextAlignment(Qt.AlignCenter)
             self.file_table.setItem(r_idx, 1, item_size)
 
-            # 状态
-            item_status = QTableWidgetItem("待转换")
+            # 2: 状态
+            is_conv = self.file_converted_cache.get(fpath, False)
+            status_text = "已转换" if is_conv else "待转换"
+            item_status = QTableWidgetItem(status_text)
             item_status.setTextAlignment(Qt.AlignCenter)
-            item_status.setForeground(Qt.darkGray)
+            item_status.setForeground(Qt.darkGreen if is_conv else Qt.darkGray)
             self.file_table.setItem(r_idx, 2, item_status)
 
-            # 删除操作按钮
-            btn_del = QPushButton("✕")
-            btn_del.setStyleSheet("border:none; color:#DC2626; font-weight:bold; font-size:14px;")
+            # 3: 删除操作
+            btn_del = QPushButton()
+            btn_del.setIcon(get_icon("x", "#94A3B8", 12))
+            btn_del.setProperty("class", "btn-ghost")
             btn_del.setCursor(Qt.PointingHandCursor)
+            btn_del.setToolTip("从列表中移除")
             btn_del.clicked.connect(lambda _, p=fpath: self._remove_single_file(p))
             self.file_table.setCellWidget(r_idx, 3, btn_del)
 
@@ -337,12 +337,15 @@ class ConvertPage(QWidget):
         if target_path in self.file_list:
             self.file_list.remove(target_path)
             self.file_records_cache.pop(target_path, None)
+            self.file_converted_cache.pop(target_path, None)
             self._refresh_file_table()
             if self.file_list:
                 self.file_table.selectRow(0)
                 self._load_file_preview(self.file_list[0])
             else:
                 self.preview_table.clear_records()
+                self.preview_current_file_lbl.setText("未选择文件")
+                self.stats_summary_lbl.setText("就绪: 支持拖拽或添加 Excel 表格 (.xlsx / .xls)")
 
     def _on_file_selected(self, row: int, col: int):
         if 0 <= row < len(self.file_list):
@@ -350,26 +353,48 @@ class ConvertPage(QWidget):
             self._load_file_preview(fpath)
 
     def _load_file_preview(self, fpath: str):
-        """读取文件并呈现在数据预览表中"""
+        """异步读取文件数据并在预览表中呈现，杜绝大文件阻塞主界面"""
+        bname = os.path.basename(fpath)
+        self.preview_current_file_lbl.setText(f"当前: {bname}")
+
         if fpath in self.file_records_cache:
             records = self.file_records_cache[fpath]
-        else:
-            try:
-                # 离线读取解析预览，避免阻塞
-                records = TableReader.read_file(fpath, allow_network=False)
-                self.file_records_cache[fpath] = records
-            except Exception as e:
-                self.preview_table.clear_records()
-                self.status_tip_lbl.setText(f"预览文件 [{os.path.basename(fpath)}] 失败: {e}")
-                return
+            is_converted = self.file_converted_cache.get(fpath, False)
+            self._display_preview_data(fpath, records, is_converted)
+            return
 
-        self.preview_table.set_records(records)
-        # 更新单表点位统计
+        # 启动非阻塞异步预览解析
+        self.stats_summary_lbl.setText(f"正在加载数据预览: {bname}...")
+        self.preview_worker = PreviewWorker(fpath, allow_network=False)
+        self.preview_worker.preview_done.connect(self._on_preview_loaded)
+        self.preview_worker.preview_failed.connect(self._on_preview_error)
+        self.preview_worker.start()
+
+    @Slot(str, list)
+    def _on_preview_loaded(self, fpath: str, records: list):
+        self.file_records_cache[fpath] = records
+        self._display_preview_data(fpath, records, is_converted=False)
+
+    @Slot(str, str)
+    def _on_preview_error(self, fpath: str, err_msg: str):
+        self.preview_table.clear_records()
+        self.stats_summary_lbl.setText(f"读取文件 [{os.path.basename(fpath)}] 失败: {err_msg}")
+
+    def _display_preview_data(self, fpath: str, records: List[Record], is_converted: bool):
+        self.preview_table.set_records(records, is_converted=is_converted)
+        total = len(records)
         succ = sum(1 for r in records if r.status == "SUCCESS")
         pend = sum(1 for r in records if r.status == "PENDING")
-        self.metric_total.set_value(str(len(records)))
-        self.metric_success.set_value(str(succ))
-        self.metric_pending.set_value(str(pend))
+
+        bname = os.path.basename(fpath)
+        if is_converted:
+            self.stats_summary_lbl.setText(
+                f"已完成转换: {bname} | 共 {total} 条点位 (已导出 {succ} 条 / 待处理 {pend} 条)"
+            )
+        else:
+            self.stats_summary_lbl.setText(
+                f"文件就绪: {bname} | 识别到 {total} 条点位 (可解析 {succ} 条 / 待核验 {pend} 条)"
+            )
 
     def start_conversion(self):
         """启动后台多线程转换任务"""
@@ -385,8 +410,9 @@ class ConvertPage(QWidget):
         self.btn_clear_files.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self.finish_actions_widget.setVisible(False)
-        self.status_tip_lbl.setText("正在执行高精坐标转换...")
+        self.btn_open_out_dir.setVisible(False)
+        self.btn_open_pending.setVisible(False)
+        self.stats_summary_lbl.setText("正在执行高精坐标转换与规范写入...")
 
         self.worker = ConversionWorker(
             source_files=self.file_list,
@@ -409,7 +435,7 @@ class ConvertPage(QWidget):
 
     @Slot(int, int, str)
     def _on_file_started(self, current: int, total: int, filename: str):
-        self.status_tip_lbl.setText(f"[{current}/{total}] 正在转换: {filename}...")
+        self.stats_summary_lbl.setText(f"[{current}/{total}] 正在转换: {filename}...")
         for r in range(self.file_table.rowCount()):
             if self.file_table.item(r, 0) and self.file_table.item(r, 0).text() == filename:
                 st = self.file_table.item(r, 2)
@@ -420,13 +446,22 @@ class ConvertPage(QWidget):
     @Slot(dict)
     def _on_file_finished(self, summary: dict):
         fname = summary["filename"]
+        fpath = summary.get("source_file") or summary.get("file", "")
         self.progress_bar.setValue(self.progress_bar.value() + 1)
+        if fpath:
+            self.file_converted_cache[fpath] = True
+
+        # 如果携带了转换后的真实记录，更新缓存并刷新展示
+        if "records" in summary and summary["records"]:
+            if fpath:
+                self.file_records_cache[fpath] = summary["records"]
+            self._display_preview_data(fpath, summary["records"], is_converted=True)
 
         for r in range(self.file_table.rowCount()):
             if self.file_table.item(r, 0) and self.file_table.item(r, 0).text() == fname:
                 st = self.file_table.item(r, 2)
                 if summary["status"] == "SUCCESS":
-                    st.setText("已完成")
+                    st.setText("已导出")
                     st.setForeground(Qt.darkGreen)
                 elif summary["status"] == "PARTIAL":
                     st.setText("部分待处理")
@@ -442,19 +477,24 @@ class ConvertPage(QWidget):
         self.btn_start.setEnabled(True)
         self.btn_add_files.setEnabled(True)
         self.btn_clear_files.setEnabled(True)
-        self.finish_actions_widget.setVisible(True)
+        self.btn_open_out_dir.setVisible(True)
 
-        self.metric_total.set_value(str(overall["total_records"]))
-        self.metric_success.set_value(str(overall["total_success"]))
-        self.metric_pending.set_value(str(overall["total_pending"]))
+        # 准确控制"查看待处理明细"状态
+        total_pending = overall.get("total_pending", 0)
+        self.btn_open_pending.setVisible(True)
+        self.btn_open_pending.setEnabled(total_pending > 0)
+        if total_pending == 0:
+            self.btn_open_pending.setToolTip("所有点位均成功转换，无待处理异常记录")
+        else:
+            self.btn_open_pending.setToolTip(f"共 {total_pending} 条待处理点位，点击打开 Excel 明细核查")
 
         tip_msg = (
-            f"转换全部完成！识别总数={overall['total_records']}, "
-            f"成功={overall['total_success']}条, 待处理={overall['total_pending']}条"
+            f"转换全部完成！识别总点位: {overall['total_records']} 条 | "
+            f"成功导出: {overall['total_success']} 条 | 待处理: {total_pending} 条"
         )
-        self.status_tip_lbl.setText(tip_msg)
+        self.stats_summary_lbl.setText(tip_msg)
 
-        # 检查是否自动打开目录
+        # 检查是否配置自动打开目录
         cfg = ConfigManager.load()
         if cfg.get("auto_open_output", True) and overall["total_success"] > 0:
             self.open_output_dir()
@@ -464,6 +504,7 @@ class ConvertPage(QWidget):
         self.btn_start.setEnabled(True)
         self.btn_add_files.setEnabled(True)
         self.btn_clear_files.setEnabled(True)
+        self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "转换异常", err_msg)
 
     def open_output_dir(self):
@@ -489,4 +530,4 @@ class ConvertPage(QWidget):
             target = pending_files[0]
             QDesktopServices.openUrl(QUrl.fromLocalFile(target))
         else:
-            QMessageBox.information(self, "提示", "所有点位均成功转换，未生成待处理明细文件！🎉")
+            QMessageBox.information(self, "提示", "所有点位均成功转换，未生成待处理明细文件！")

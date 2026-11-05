@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-GUI 交互与视觉截图验收测试
+GUI 交互与视觉截图验收测试 (Fluent 顶栏极简版)
 覆盖:
-1. 主界面初始状态
-2. 文件导入与数据即时预览
-3. 真实转换执行与完成状态展示
-4. 历史记录页面
-5. 设置与模板管理页面
-6. 深色主题切换效果
+1. 1200×760 主界面初始状态、文件导入与预览、转换完成、历史记录、设置页面、深色模式
+2. 960×620 紧凑分辨率下的布局自适应与防截断验证
 """
 
 import os
@@ -38,6 +34,7 @@ def test_gui_full_lifecycle_and_screenshots(qapp):
     window.show()
     qapp.processEvents()
 
+    # ================= 1. 1200x760 分辨率验收 =================
     # 1. 截图: 初始空白主界面
     shot1 = os.path.join(screenshots_dir, "01_main_window_empty.png")
     window.grab().save(shot1)
@@ -49,12 +46,16 @@ def test_gui_full_lifecycle_and_screenshots(qapp):
 
     convert_page = window.convert_page
     convert_page.add_files([src_file])
+
+    # 等待异步预览解析完成
+    while convert_page.preview_worker and convert_page.preview_worker.isRunning():
+        qapp.processEvents()
     qapp.processEvents()
 
     # 验证文件列表及预览表数据
     assert convert_page.file_table.rowCount() == 1
     assert convert_page.preview_table.table.rowCount() == 18
-    assert convert_page.metric_total.value_lbl.text() == "18"
+    assert "新建 XLSX 工作表.xlsx" in convert_page.preview_current_file_lbl.text()
 
     # 截图: 文件导入与数据预览
     shot2 = os.path.join(screenshots_dir, "02_files_imported_and_preview.png")
@@ -73,9 +74,14 @@ def test_gui_full_lifecycle_and_screenshots(qapp):
 
         qapp.processEvents()
 
-        assert convert_page.metric_success.value_lbl.text() == "18"
-        assert convert_page.metric_pending.value_lbl.text() == "0"
-        assert convert_page.finish_actions_widget.isVisible()
+        assert convert_page.btn_open_out_dir.isVisible()
+        assert convert_page.btn_open_pending.isVisible()
+        # 18 条点位全部成功，因此待处理按钮被禁用
+        assert not convert_page.btn_open_pending.isEnabled()
+        assert "成功导出: 18 条" in convert_page.stats_summary_lbl.text()
+
+        # 验证预览表中状态已刷新为"已导出"
+        assert convert_page.preview_table.table.item(0, 6).text() == "已导出"
 
         # 截图: 转换完成状态
         shot3 = os.path.join(screenshots_dir, "03_conversion_completed.png")
@@ -102,14 +108,32 @@ def test_gui_full_lifecycle_and_screenshots(qapp):
     assert os.path.isfile(shot5)
 
     # 6. 切换为深色主题
-    window.settings_page.combo_theme.setCurrentIndex(1)
+    window.btn_theme_toggle.click()
+    qapp.processEvents()
+
+    # 切回转换工作区查看深色模式实际效果
+    window.btn_nav_convert.click()
     qapp.processEvents()
 
     shot6 = os.path.join(screenshots_dir, "06_dark_theme.png")
     window.grab().save(shot6)
     assert os.path.isfile(shot6)
 
-    # 恢复浅色主题
-    window.settings_page.combo_theme.setCurrentIndex(0)
+    # ================= 2. 960x620 紧凑分辨率自适应验收 =================
+    window.resize(960, 620)
     qapp.processEvents()
+
+    # 7. 截图: 960x620 深色主界面 (无任何控件挤压与异常滚动条)
+    shot7 = os.path.join(screenshots_dir, "07_dark_theme_960x620.png")
+    window.grab().save(shot7)
+    assert os.path.isfile(shot7)
+
+    # 恢复浅色主题并在 960x620 下核验
+    window.btn_theme_toggle.click()
+    qapp.processEvents()
+
+    shot8 = os.path.join(screenshots_dir, "08_light_theme_960x620.png")
+    window.grab().save(shot8)
+    assert os.path.isfile(shot8)
+
     window.close()

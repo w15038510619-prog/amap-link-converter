@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 系统设置与模板管理页面 (SettingsPage)
-重点包含:
+极简高颜值 Windows 11 Fluent 风格:
 1. 模板管理 (当前生效模板展示、内置/自定义状态、导出空白模板、选择自定义模板校验、恢复内置)
 2. 导出偏好 (默认输出目录、转换后自动打开目录开关)
 3. 网络与接口配置 (高德分享公开接口开关)
@@ -21,9 +21,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QScrollArea,
+    QFrame,
 )
 
-from gui.components.card import CardWidget
+from gui.icons import get_icon
 from core.template_manager import (
     ConfigManager,
     TemplateManager,
@@ -43,16 +44,16 @@ class SettingsPage(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(18, 16, 18, 16)
+        main_layout.setSpacing(12)
 
         # 页面标题
         title_layout = QVBoxLayout()
         title_layout.setSpacing(2)
         title_lbl = QLabel("应用设置与模板管理")
-        title_lbl.setProperty("class", "page-title")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 700;")
         sub_lbl = QLabel("管理内置导入模板、自定义规范及运行偏好")
-        sub_lbl.setProperty("class", "page-subtitle")
+        sub_lbl.setStyleSheet("font-size: 12px; color: #64748B;")
         title_layout.addWidget(title_lbl)
         title_layout.addWidget(sub_lbl)
         main_layout.addLayout(title_layout)
@@ -65,72 +66,90 @@ class SettingsPage(QWidget):
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(16)
+        scroll_layout.setSpacing(12)
 
         # 1. 核心模块: 模板管理卡片
-        template_card = CardWidget(
-            "地图导入模板管理",
-            "本软件已将官方标准导入模板内置于程序中，日常使用完全无需手动选择。"
-        )
-        tpl_layout = QVBoxLayout()
-        tpl_layout.setSpacing(14)
+        template_card = QFrame()
+        template_card.setProperty("class", "fluent-card")
+        tpl_layout = QVBoxLayout(template_card)
+        tpl_layout.setContentsMargins(14, 12, 14, 12)
+        tpl_layout.setSpacing(10)
+
+        tpl_title = QLabel("地图导入模板管理")
+        tpl_title.setStyleSheet("font-size: 13px; font-weight: 600;")
+        tpl_layout.addWidget(tpl_title)
+
+        tpl_desc = QLabel("本软件已将官方标准导入模板内置于程序中，日常使用完全无需手动选择。")
+        tpl_desc.setStyleSheet("font-size: 12px; color: #64748B;")
+        tpl_layout.addWidget(tpl_desc)
 
         # 状态呈现
         status_box = QHBoxLayout()
         status_box.setSpacing(12)
 
         status_left = QVBoxLayout()
-        status_left.setSpacing(4)
+        status_left.setSpacing(3)
         self.current_tpl_label = QLabel("当前模板：内置官方模板 (default.xlsx)")
-        self.current_tpl_label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        self.current_tpl_label.setStyleSheet("font-size: 12px; font-weight: 600;")
         self.tpl_status_label = QLabel("模板状态：已就绪（严格符合 标记位置 9 列表头规范）")
-        self.tpl_status_label.setStyleSheet("font-size: 12px; color: #15803D;")
+        self.tpl_status_label.setStyleSheet("font-size: 12px; color: #16A34A;")
         status_left.addWidget(self.current_tpl_label)
         status_left.addWidget(self.tpl_status_label)
         status_box.addLayout(status_left, 1)
 
         self.tpl_badge = QLabel(" 内置官方 ")
-        self.tpl_badge.setStyleSheet(
-            "background-color: #DCFCE7; color: #15803D; font-weight: 700; border-radius: 4px; padding: 4px 10px;"
-        )
+        self.tpl_badge.setProperty("class", "badge-success")
         status_box.addWidget(self.tpl_badge, 0)
 
         tpl_layout.addLayout(status_box)
 
         # 操作按钮条
         action_bar = QHBoxLayout()
-        action_bar.setSpacing(10)
+        action_bar.setSpacing(8)
 
-        self.btn_export_blank = QPushButton("📤 导出一份空白模板")
+        self.btn_export_blank = QPushButton("导出一份空白模板")
+        self.btn_export_blank.setIcon(get_icon("download", "#374151", 14))
         self.btn_export_blank.setProperty("class", "btn-secondary")
+        self.btn_export_blank.setCursor(Qt.PointingHandCursor)
         self.btn_export_blank.clicked.connect(self._export_blank_template)
         action_bar.addWidget(self.btn_export_blank)
 
-        self.btn_choose_custom = QPushButton("📁 选择自定义模板")
+        self.btn_choose_custom = QPushButton("选择自定义模板")
+        self.btn_choose_custom.setIcon(get_icon("file-excel", "#374151", 14))
         self.btn_choose_custom.setProperty("class", "btn-secondary")
+        self.btn_choose_custom.setCursor(Qt.PointingHandCursor)
         self.btn_choose_custom.clicked.connect(self._choose_custom_template)
         action_bar.addWidget(self.btn_choose_custom)
 
-        self.btn_reset_builtin = QPushButton("🔄 恢复内置默认模板")
+        self.btn_reset_builtin = QPushButton("恢复内置默认模板")
+        self.btn_reset_builtin.setIcon(get_icon("refresh", "#374151", 14))
         self.btn_reset_builtin.setProperty("class", "btn-secondary")
+        self.btn_reset_builtin.setCursor(Qt.PointingHandCursor)
         self.btn_reset_builtin.clicked.connect(self._reset_builtin_template)
         action_bar.addWidget(self.btn_reset_builtin)
 
-        self.btn_view_spec = QPushButton("ℹ️ 查看模板字段规范")
+        self.btn_view_spec = QPushButton("查看模板规范")
+        self.btn_view_spec.setIcon(get_icon("list", "#374151", 14))
         self.btn_view_spec.setProperty("class", "btn-secondary")
+        self.btn_view_spec.setCursor(Qt.PointingHandCursor)
         self.btn_view_spec.clicked.connect(self._show_spec_dialog)
         action_bar.addWidget(self.btn_view_spec)
 
         action_bar.addStretch()
         tpl_layout.addLayout(action_bar)
 
-        template_card.set_content_layout(tpl_layout)
         scroll_layout.addWidget(template_card)
 
         # 2. 导出与常规偏好卡片
-        export_card = CardWidget("导出偏好设置", "自定义导出文件夹与自动化动作")
-        exp_layout = QVBoxLayout()
-        exp_layout.setSpacing(12)
+        export_card = QFrame()
+        export_card.setProperty("class", "fluent-card")
+        exp_layout = QVBoxLayout(export_card)
+        exp_layout.setContentsMargins(14, 12, 14, 12)
+        exp_layout.setSpacing(10)
+
+        exp_title = QLabel("导出偏好设置")
+        exp_title.setStyleSheet("font-size: 13px; font-weight: 600;")
+        exp_layout.addWidget(exp_title)
 
         # 自动打开输出目录
         self.chk_auto_open = QCheckBox("转换成功后自动在资源管理器中打开导出文件夹")
@@ -141,11 +160,13 @@ class SettingsPage(QWidget):
         # 默认输出路径设定
         dir_box = QHBoxLayout()
         dir_lbl = QLabel("默认导出目录:")
-        dir_lbl.setStyleSheet("color: #475569; font-weight: 500;")
+        dir_lbl.setStyleSheet("color: #64748B; font-weight: 500;")
         self.lbl_default_dir = QLabel("./导出结果")
-        self.lbl_default_dir.setProperty("class", "path-display")
-        btn_change_def_dir = QPushButton("浏览...")
+        self.lbl_default_dir.setProperty("class", "path-box")
+
+        btn_change_def_dir = QPushButton("更改")
         btn_change_def_dir.setProperty("class", "btn-secondary")
+        btn_change_def_dir.setCursor(Qt.PointingHandCursor)
         btn_change_def_dir.clicked.connect(self._change_default_dir)
 
         dir_box.addWidget(dir_lbl)
@@ -153,13 +174,18 @@ class SettingsPage(QWidget):
         dir_box.addWidget(btn_change_def_dir)
         exp_layout.addLayout(dir_box)
 
-        export_card.set_content_layout(exp_layout)
         scroll_layout.addWidget(export_card)
 
         # 3. 坐标解析与网络设置卡片
-        network_card = CardWidget("解析引擎与网络设置", "控制高德与百度地图解析规则")
-        net_layout = QVBoxLayout()
-        net_layout.setSpacing(10)
+        network_card = QFrame()
+        network_card.setProperty("class", "fluent-card")
+        net_layout = QVBoxLayout(network_card)
+        net_layout.setContentsMargins(14, 12, 14, 12)
+        net_layout.setSpacing(8)
+
+        net_title = QLabel("解析引擎与网络设置")
+        net_title.setStyleSheet("font-size: 13px; font-weight: 600;")
+        net_layout.addWidget(net_title)
 
         self.chk_share_api = QCheckBox("启用高德动态分享页同源解析接口 (GET m5.amap.com)")
         self.chk_share_api.setChecked(True)
@@ -174,13 +200,17 @@ class SettingsPage(QWidget):
         coord_tip.setWordWrap(True)
         net_layout.addWidget(coord_tip)
 
-        network_card.set_content_layout(net_layout)
         scroll_layout.addWidget(network_card)
 
         # 4. 外观与主题
-        theme_card = CardWidget("界面外观", "切换 Windows 11 Fluent 视觉主题")
-        thm_layout = QHBoxLayout()
-        thm_lbl = QLabel("主题配色模式:")
+        theme_card = QFrame()
+        theme_card.setProperty("class", "fluent-card")
+        thm_layout = QHBoxLayout(theme_card)
+        thm_layout.setContentsMargins(14, 12, 14, 12)
+        thm_layout.setSpacing(12)
+
+        thm_lbl = QLabel("界面主题模式:")
+        thm_lbl.setStyleSheet("font-size: 13px; font-weight: 600;")
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(["浅色主题 (Light - 默认)", "深色主题 (Dark)"])
         self.combo_theme.currentIndexChanged.connect(self._on_theme_changed)
@@ -188,20 +218,21 @@ class SettingsPage(QWidget):
         thm_layout.addWidget(self.combo_theme)
         thm_layout.addStretch()
 
-        theme_card.set_content_layout(thm_layout)
         scroll_layout.addWidget(theme_card)
 
-        # 5. 关于与合规说明
-        about_card = CardWidget("关于软件", "地图位置转换器 V2.0 商业重构版")
-        abt_layout = QVBoxLayout()
+        # 5. 关于与版本说明
+        about_card = QFrame()
+        about_card.setProperty("class", "fluent-card")
+        abt_layout = QVBoxLayout(about_card)
+        abt_layout.setContentsMargins(14, 12, 14, 12)
         abt_layout.setSpacing(4)
-        v_lbl = QLabel("软件版本: V2.0 Fluent Edition (Windows 64-bit)")
-        v_lbl.setStyleSheet("font-weight: 600; color: #0F172A;")
-        t_lbl = QLabel("技术栈: Python + PySide6 (Qt) + openpyxl + xlrd + Requests")
+
+        v_lbl = QLabel("地图位置转换器 V2.0 Fluent Edition (Windows 64-bit)")
+        v_lbl.setStyleSheet("font-weight: 600;")
+        t_lbl = QLabel("技术栈: Python + PySide6 (Qt) + openpyxl + xlrd + Requests | 内置 GCJ-02 模板规范")
         t_lbl.setStyleSheet("color: #64748B; font-size: 12px;")
         abt_layout.addWidget(v_lbl)
         abt_layout.addWidget(t_lbl)
-        about_card.set_content_layout(abt_layout)
         scroll_layout.addWidget(about_card)
 
         scroll_layout.addStretch()
@@ -217,18 +248,18 @@ class SettingsPage(QWidget):
         if is_builtin:
             self.current_tpl_label.setText("当前模板：内置官方模板 (resources/templates/default.xlsx)")
             self.tpl_badge.setText(" 内置官方 ")
-            self.tpl_badge.setStyleSheet(
-                "background-color: #DCFCE7; color: #15803D; font-weight: 700; border-radius: 4px; padding: 4px 10px;"
-            )
+            self.tpl_badge.setProperty("class", "badge-success")
             self.btn_reset_builtin.setEnabled(False)
         else:
             self.current_tpl_label.setText(f"当前模板：自定义模板 ({os.path.basename(active_path)})")
             self.current_tpl_label.setToolTip(active_path)
             self.tpl_badge.setText(" 自定义模板 ")
-            self.tpl_badge.setStyleSheet(
-                "background-color: #E0F2FE; color: #0369A1; font-weight: 700; border-radius: 4px; padding: 4px 10px;"
-            )
+            self.tpl_badge.setProperty("class", "badge-ready")
             self.btn_reset_builtin.setEnabled(True)
+
+        # 重新应用样式以使 badge property 生效
+        self.tpl_badge.style().unpolish(self.tpl_badge)
+        self.tpl_badge.style().polish(self.tpl_badge)
 
         # 导出偏好
         self.chk_auto_open.setChecked(cfg.get("auto_open_output", True))
@@ -249,7 +280,7 @@ class SettingsPage(QWidget):
         if target_path:
             ok, msg = TemplateManager.export_blank_template(target_path)
             if ok:
-                QMessageBox.showinfo("导出成功", f"空白模板已导出至:\n{target_path}")
+                QMessageBox.information(self, "导出成功", f"空白模板已导出至:\n{target_path}")
             else:
                 QMessageBox.critical(self, "导出失败", msg)
 
@@ -257,19 +288,18 @@ class SettingsPage(QWidget):
         chosen_file, _ = QFileDialog.getOpenFileNames(
             self, "选择自定义地图导入模板", "", "Excel 模板文件 (*.xlsx)"
         )
-        # 单选兼容
         target = chosen_file[0] if chosen_file else ""
         if target:
             ok, msg = TemplateManager.set_custom_template(target)
             if ok:
-                QMessageBox.showinfo("设置成功", "自定义模板已通过合规校验并成功应用！")
+                QMessageBox.information(self, "设置成功", "自定义模板已通过合规校验并成功应用！")
                 self.load_settings()
             else:
                 QMessageBox.warning(self, "模板校验失败", f"该文件不符合地图导入规范:\n{msg}")
 
     def _reset_builtin_template(self):
         TemplateManager.reset_to_builtin()
-        QMessageBox.showinfo("已恢复", "已成功恢复为内置官方模板！")
+        QMessageBox.information(self, "已恢复", "已成功恢复为内置官方模板！")
         self.load_settings()
 
     def _show_spec_dialog(self):

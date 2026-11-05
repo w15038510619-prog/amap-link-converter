@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 后台工作线程模块 (基于 PySide6 QThread)
-负责:
-1. 在非主线程中异步执行批量 Excel 文件转换
-2. 实时通过 Qt 信号向界面汇报逐文件、逐记录进度及日志
-3. 保证 UI 响应流畅无假死，支持安全取消与异常捕获
+包含:
+1. ConversionWorker: 异步执行批量 Excel 文件转换并生成导入模板与待处理明细
+2. PreviewWorker: 异步读取并解析 Excel 数据用于即时只读预览，避免阻塞 GUI 主线程
 """
 
 import datetime
 import os
-import sys
 from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -17,6 +15,25 @@ from PySide6.QtCore import QThread, Signal
 from map_link_converter import TableReader, TemplateWriter, Record
 from core.template_manager import TemplateManager
 from core.history_manager import HistoryManager
+
+
+class PreviewWorker(QThread):
+    """异步数据预览读取线程，避免大文件阻塞界面"""
+
+    preview_done = Signal(str, list)  # (file_path, records)
+    preview_failed = Signal(str, str)  # (file_path, error_msg)
+
+    def __init__(self, file_path: str, allow_network: bool = False, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.allow_network = allow_network
+
+    def run(self):
+        try:
+            records = TableReader.read_file(self.file_path, allow_network=self.allow_network)
+            self.preview_done.emit(self.file_path, records)
+        except Exception as e:
+            self.preview_failed.emit(self.file_path, str(e))
 
 
 class ConversionWorker(QThread):
@@ -56,7 +73,7 @@ class ConversionWorker(QThread):
         self.started_signal.emit(total_files, 0)
         self.log_signal.emit(
             "INFO",
-            f"转换任务启动: 共 {total_files} 个文件, 模板: {os.path.basename(self.template_path)}"
+            f"转换任务启动: 共 {total_files} 个文件, 使用模板: {os.path.basename(self.template_path)}"
         )
 
         overall = {
@@ -91,31 +108,36 @@ class ConversionWorker(QThread):
             self.log_signal.emit("INFO", f"[{idx}/{total_files}] 开始解析: {base_name}")
 
             try:
-                # 读取并解析文件内记录
                 records = TableReader.read_file(src_file, allow_network=self.allow_network)
                 total_rec = len(records)
                 self.record_progress_signal.emit(total_rec, total_rec)
 
-                # 写入导入模板与待处理明细
                 import_path, pending_path, succ_cnt, pend_cnt = TemplateWriter.write_results(
                     self.template_path, self.output_dir, src_file, records
                 )
 
                 file_summary = {
                     "file": src_file,
+                    "source_file": src_file,
                     "filename": base_name,
                     "total": total_rec,
                     "success": succ_cnt,
                     "pending": pend_cnt,
                     "import_file": import_path,
                     "pending_file": pending_path,
-                    "status": "SUCCESS" if pend_cnt == 0 else "PARTIAL",
+                    "records": records,  # 供 GUI 刷新预览
+                    "status": "SUCCESS" if (pend_cnt == 0 and succ_cnt > 0) else (
+                        "PARTIAL" if succ_cnt > 0 else "FAILED"
+                    ),
                 }
 
                 overall["total_records"] += total_rec
                 overall["total_success"] += succ_cnt
                 overall["total_pending"] += pend_cnt
-                overall["file_results"].append(file_summary)
+
+                # 存入历史记录时剔除不可 JSON 序列化的 Record 实例对象
+                file_summary_clean = {k: v for k, v in file_summary.items() if k != "records"}
+                overall["file_results"].append(file_summary_clean)
 
                 self.file_finished_signal.emit(file_summary)
                 self.log_signal.emit(
@@ -128,20 +150,36 @@ class ConversionWorker(QThread):
                 self.log_signal.emit("ERROR", err_msg)
                 file_summary = {
                     "file": src_file,
+                    "source_file": src_file,
                     "filename": base_name,
                     "total": 0,
                     "success": 0,
                     "pending": 0,
                     "import_file": None,
                     "pending_file": None,
+                    "records": [],
                     "status": f"FAILED: {e}",
                 }
-                overall["file_results"].append(file_summary)
+                file_summary_clean = {k: v for k, v in file_summary.items() if k != "records"}
+                overall["file_results"].append(file_summary_clean)
                 self.file_finished_signal.emit(file_summary)
 
         overall["end_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 写入历史记录
+        # 准确判定历史记录状态
+        if overall["cancelled"]:
+            hist_status = "CANCELLED"
+        elif overall["total_records"] == 0:
+            hist_status = "FAILED"
+        elif any(f.get("status", "").startswith("FAILED") for f in overall["file_results"]):
+            hist_status = "PARTIAL" if overall["total_success"] > 0 else "FAILED"
+        elif overall["total_pending"] > 0:
+            hist_status = "PARTIAL"
+        elif overall["total_success"] == overall["total_records"] and overall["total_records"] > 0:
+            hist_status = "SUCCESS"
+        else:
+            hist_status = "PARTIAL"
+
         try:
             hist_item = {
                 "id": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -152,9 +190,7 @@ class ConversionWorker(QThread):
                 "total_pending": overall["total_pending"],
                 "output_dir": overall["output_dir"],
                 "file_results": overall["file_results"],
-                "status": "CANCELLED" if overall["cancelled"] else (
-                    "SUCCESS" if overall["total_pending"] == 0 else "PARTIAL"
-                ),
+                "status": hist_status,
             }
             HistoryManager.add(hist_item)
         except Exception as e:
