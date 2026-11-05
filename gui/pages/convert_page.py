@@ -4,9 +4,10 @@
 极简、高效、现代 Windows 11 Fluent 布局:
 1. 醒目主操作栏: 「添加文件」「开始转换」首屏直达
 2. 单行紧凑输出目录与状态标识，内置模板零打扰就绪
-3. 紧凑型文件队列与拖拽导入条
+3. 紧凑型文件队列与拖拽导入条 (支持多文件滚动浏览与完整文件名展示)
 4. 单行状态与实时统计条，摒弃臃肿卡片
-5. 宽敞居中的核心数据预览区，支持非阻塞异步加载与精准状态区分
+5. 宽敞居中的核心数据预览区，支持非阻塞异步加载、请求标识安全校验与增量渲染
+6. 严格的任务并发控制: 转换期间禁止删除、清空、拖拽或更改输出路径
 """
 
 import os
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
 from gui.icons import get_icon
 from gui.components.drop_area import FileDropWidget
 from gui.components.data_table import PreviewTableWidget
-from core.template_manager import ConfigManager, TemplateManager
+from core.template_manager import ConfigManager
 from core.worker import ConversionWorker, PreviewWorker
 from map_link_converter import Record
 
@@ -55,9 +56,16 @@ class ConvertPage(QWidget):
         super().__init__(parent)
         self.file_list: List[str] = []
         self.file_records_cache: Dict[str, List[Record]] = {}
-        self.file_converted_cache: Dict[str, bool] = {}  # 记录是否已完成转换导出
+        self.file_converted_cache: Dict[str, bool] = {}  # 记录是否已成功生成对应输出文件
         self.worker: Optional[ConversionWorker] = None
+
+        # 异步预览线程与请求标识安全管理
         self.preview_worker: Optional[PreviewWorker] = None
+        self._preview_request_id: int = 0
+        self._current_preview_path: Optional[str] = None
+        self._active_preview_workers: List[PreviewWorker] = []
+
+        self.is_converting: bool = False
         self.last_summary: Optional[dict] = None
         self.output_dir: str = ""
 
@@ -137,20 +145,21 @@ class ConvertPage(QWidget):
 
         main_layout.addLayout(action_bar)
 
-        # ================= 2. 紧凑型文件队列与拖拽导入栏 =================
+        # ================= 2. 紧凑型文件队列与拖拽导入栏 (支持多文件滚动) =================
         file_strip_frame = QFrame()
         file_strip_frame.setProperty("class", "fluent-card")
         file_strip_layout = QHBoxLayout(file_strip_frame)
         file_strip_layout.setContentsMargins(10, 8, 10, 8)
         file_strip_layout.setSpacing(12)
 
-        # 左侧: 紧凑拖拽导入条
+        # 左侧: 紧凑拖拽导入条 (高度 115px，与右侧多文件列表平齐)
         self.drop_widget = FileDropWidget()
         self.drop_widget.setFixedWidth(230)
+        self.drop_widget.setFixedHeight(115)
         self.drop_widget.files_selected.connect(self.add_files)
         file_strip_layout.addWidget(self.drop_widget)
 
-        # 右侧: 紧凑文件列表 (高度适中，完整呈现长文件名)
+        # 右侧: 多文件列表 (高度 115px，可滚动查看 3~5 个文件)
         file_table_container = QVBoxLayout()
         file_table_container.setSpacing(4)
 
@@ -172,7 +181,7 @@ class ConvertPage(QWidget):
         file_table_container.addLayout(table_header_bar)
 
         self.file_table = QTableWidget()
-        self.file_table.setFixedHeight(82)
+        self.file_table.setFixedHeight(115)
         self.file_table.setColumnCount(4)
         self.file_table.setHorizontalHeaderLabels(["文件名", "大小", "状态", "移除"])
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -180,6 +189,9 @@ class ConvertPage(QWidget):
         self.file_table.setShowGrid(False)
         self.file_table.setAlternatingRowColors(True)
         self.file_table.verticalHeader().setVisible(False)
+        self.file_table.verticalHeader().setDefaultSectionSize(26)
+        self.file_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.file_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         f_header = self.file_table.horizontalHeader()
         f_header.setHighlightSections(False)
@@ -247,6 +259,8 @@ class ConvertPage(QWidget):
         self.out_dir_lbl.setToolTip(self.output_dir)
 
     def _choose_output_dir(self):
+        if self.is_converting:
+            return
         chosen = QFileDialog.getExistingDirectory(
             self, "选择导出结果保存目录", self.output_dir
         )
@@ -259,6 +273,8 @@ class ConvertPage(QWidget):
             ConfigManager.save(cfg)
 
     def _browse_add_files(self):
+        if self.is_converting:
+            return
         files, _ = QFileDialog.getOpenFileNames(
             self, "添加待转换的 Excel 文件", "", "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)"
         )
@@ -267,22 +283,37 @@ class ConvertPage(QWidget):
 
     @Slot(list)
     def add_files(self, paths: List[str]):
-        """添加文件到列表，自动过滤重复文件"""
+        """添加文件到列表，自动过滤重复文件；转换期间自动拒绝添加"""
+        if self.is_converting:
+            return
+
         added_count = 0
+        first_new_path = None
         for p in paths:
             abs_p = os.path.abspath(p)
             if abs_p not in self.file_list and os.path.isfile(abs_p):
                 self.file_list.append(abs_p)
+                if first_new_path is None:
+                    first_new_path = abs_p
                 added_count += 1
 
         if added_count > 0:
             self._refresh_file_table()
-            # 默认选中第一个未预览的文件
-            if self.file_table.rowCount() > 0:
-                self.file_table.selectRow(0)
-                self._load_file_preview(self.file_list[0])
+            # 选中并预览首个添加的文件
+            target_to_preview = first_new_path or self.file_list[0]
+            target_row = self.file_list.index(target_to_preview)
+            self.file_table.selectRow(target_row)
+            self._load_file_preview(target_to_preview)
 
     def clear_files(self):
+        if self.is_converting:
+            return
+
+        # 作废所有在途的预览请求
+        self._preview_request_id += 1
+        self._current_preview_path = None
+        self._cancel_active_preview_workers()
+
         self.file_list = []
         self.file_records_cache = {}
         self.file_converted_cache = {}
@@ -306,7 +337,7 @@ class ConvertPage(QWidget):
             except Exception:
                 fsize = "未知"
 
-            # 0: 文件名
+            # 0: 文件名 (完整路径作为 Tooltip)
             item_name = QTableWidgetItem(bname)
             item_name.setToolTip(fpath)
             self.file_table.setItem(r_idx, 0, item_name)
@@ -318,7 +349,7 @@ class ConvertPage(QWidget):
 
             # 2: 状态
             is_conv = self.file_converted_cache.get(fpath, False)
-            status_text = "已转换" if is_conv else "待转换"
+            status_text = "已导出" if is_conv else "待转换"
             item_status = QTableWidgetItem(status_text)
             item_status.setTextAlignment(Qt.AlignCenter)
             item_status.setForeground(Qt.darkGreen if is_conv else Qt.darkGray)
@@ -330,14 +361,24 @@ class ConvertPage(QWidget):
             btn_del.setProperty("class", "btn-ghost")
             btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setToolTip("从列表中移除")
+            btn_del.setEnabled(not self.is_converting)
             btn_del.clicked.connect(lambda _, p=fpath: self._remove_single_file(p))
             self.file_table.setCellWidget(r_idx, 3, btn_del)
 
     def _remove_single_file(self, target_path: str):
+        if self.is_converting:
+            return
+
         if target_path in self.file_list:
             self.file_list.remove(target_path)
             self.file_records_cache.pop(target_path, None)
             self.file_converted_cache.pop(target_path, None)
+
+            if self._current_preview_path == target_path:
+                self._preview_request_id += 1
+                self._current_preview_path = None
+                self._cancel_active_preview_workers()
+
             self._refresh_file_table()
             if self.file_list:
                 self.file_table.selectRow(0)
@@ -353,30 +394,71 @@ class ConvertPage(QWidget):
             self._load_file_preview(fpath)
 
     def _load_file_preview(self, fpath: str):
-        """异步读取文件数据并在预览表中呈现，杜绝大文件阻塞主界面"""
+        """
+        异步读取文件数据并在预览表中呈现:
+        1. 采用自增 preview_request_id 与 current_preview_path 校验，防止快速切换时旧任务结果错位覆盖
+        2. 取消并安全解绑旧工作线程，杜绝 QThread: Destroyed 异常
+        """
+        self._preview_request_id += 1
+        req_id = self._preview_request_id
+        self._current_preview_path = fpath
+
         bname = os.path.basename(fpath)
         self.preview_current_file_lbl.setText(f"当前: {bname}")
 
+        # 若已有缓存，直接展示
         if fpath in self.file_records_cache:
             records = self.file_records_cache[fpath]
             is_converted = self.file_converted_cache.get(fpath, False)
             self._display_preview_data(fpath, records, is_converted)
             return
 
+        # 取消现有预览工作线程
+        self._cancel_active_preview_workers()
+
         # 启动非阻塞异步预览解析
         self.stats_summary_lbl.setText(f"正在加载数据预览: {bname}...")
-        self.preview_worker = PreviewWorker(fpath, allow_network=False)
-        self.preview_worker.preview_done.connect(self._on_preview_loaded)
-        self.preview_worker.preview_failed.connect(self._on_preview_error)
-        self.preview_worker.start()
+        worker = PreviewWorker(req_id, fpath, allow_network=False)
+        self.preview_worker = worker
+        self._active_preview_workers.append(worker)
 
-    @Slot(str, list)
-    def _on_preview_loaded(self, fpath: str, records: list):
+        worker.preview_done.connect(self._on_preview_loaded)
+        worker.preview_failed.connect(self._on_preview_error)
+        worker.finished.connect(lambda w=worker: self._cleanup_preview_worker(w))
+        worker.start()
+
+    def _cancel_active_preview_workers(self):
+        for w in list(self._active_preview_workers):
+            w.cancel()
+
+    def _cleanup_preview_worker(self, worker: PreviewWorker):
+        if worker in self._active_preview_workers:
+            self._active_preview_workers.remove(worker)
+        worker.deleteLater()
+
+    @Slot(int, str, list)
+    def _on_preview_loaded(self, req_id: int, fpath: str, records: list):
+        # 校验请求标识与文件存在性，丢弃已过期或已删除文件的回调
+        if (
+            req_id != self._preview_request_id
+            or fpath != self._current_preview_path
+            or fpath not in self.file_list
+        ):
+            return
+
         self.file_records_cache[fpath] = records
-        self._display_preview_data(fpath, records, is_converted=False)
+        is_converted = self.file_converted_cache.get(fpath, False)
+        self._display_preview_data(fpath, records, is_converted=is_converted)
 
-    @Slot(str, str)
-    def _on_preview_error(self, fpath: str, err_msg: str):
+    @Slot(int, str, str)
+    def _on_preview_error(self, req_id: int, fpath: str, err_msg: str):
+        if (
+            req_id != self._preview_request_id
+            or fpath != self._current_preview_path
+            or fpath not in self.file_list
+        ):
+            return
+
         self.preview_table.clear_records()
         self.stats_summary_lbl.setText(f"读取文件 [{os.path.basename(fpath)}] 失败: {err_msg}")
 
@@ -396,8 +478,25 @@ class ConvertPage(QWidget):
                 f"文件就绪: {bname} | 识别到 {total} 条点位 (可解析 {succ} 条 / 待核验 {pend} 条)"
             )
 
+    def _set_ui_converting_state(self, converting: bool):
+        """在转换期间锁定所有修改操作，防止状态冲突"""
+        self.is_converting = converting
+        self.btn_start.setEnabled(not converting)
+        self.btn_add_files.setEnabled(not converting)
+        self.btn_clear_files.setEnabled(not converting)
+        self.btn_choose_out.setEnabled(not converting)
+        self.drop_widget.set_enabled(not converting)
+
+        for r in range(self.file_table.rowCount()):
+            w = self.file_table.cellWidget(r, 3)
+            if w:
+                w.setEnabled(not converting)
+
     def start_conversion(self):
         """启动后台多线程转换任务"""
+        if self.is_converting:
+            return
+
         if not self.file_list:
             QMessageBox.information(self, "提示", "请先添加至少一个待转换的 Excel 文件！")
             return
@@ -405,9 +504,7 @@ class ConvertPage(QWidget):
         cfg = ConfigManager.load()
         allow_network = cfg.get("enable_share_api", True)
 
-        self.btn_start.setEnabled(False)
-        self.btn_add_files.setEnabled(False)
-        self.btn_clear_files.setEnabled(False)
+        self._set_ui_converting_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.btn_open_out_dir.setVisible(False)
@@ -448,35 +545,45 @@ class ConvertPage(QWidget):
         fname = summary["filename"]
         fpath = summary.get("source_file") or summary.get("file", "")
         self.progress_bar.setValue(self.progress_bar.value() + 1)
-        if fpath:
-            self.file_converted_cache[fpath] = True
 
-        # 如果携带了转换后的真实记录，更新缓存并刷新展示
+        # 严格校验是否生成有效输出文件，避免失败文件被错误标记为"已导出"
+        status_code = summary.get("status", "FAILED")
+        import_file = summary.get("import_file")
+        has_real_export = (
+            status_code in ("SUCCESS", "PARTIAL")
+            and bool(import_file)
+            and os.path.isfile(import_file)
+        )
+
+        if fpath:
+            self.file_converted_cache[fpath] = has_real_export
+
+        # 转换后包含真实导出状态的记录
         if "records" in summary and summary["records"]:
             if fpath:
                 self.file_records_cache[fpath] = summary["records"]
-            self._display_preview_data(fpath, summary["records"], is_converted=True)
+            if self._current_preview_path == fpath:
+                self._display_preview_data(fpath, summary["records"], is_converted=has_real_export)
 
+        # 更新队列中单文件状态
         for r in range(self.file_table.rowCount()):
             if self.file_table.item(r, 0) and self.file_table.item(r, 0).text() == fname:
                 st = self.file_table.item(r, 2)
-                if summary["status"] == "SUCCESS":
+                if status_code == "SUCCESS":
                     st.setText("已导出")
                     st.setForeground(Qt.darkGreen)
-                elif summary["status"] == "PARTIAL":
+                elif status_code == "PARTIAL":
                     st.setText("部分待处理")
                     st.setForeground(Qt.darkYellow)
                 else:
-                    st.setText("失败")
+                    st.setText("转换失败")
                     st.setForeground(Qt.darkRed)
                 break
 
     @Slot(dict)
     def _on_batch_finished(self, overall: dict):
         self.last_summary = overall
-        self.btn_start.setEnabled(True)
-        self.btn_add_files.setEnabled(True)
-        self.btn_clear_files.setEnabled(True)
+        self._set_ui_converting_state(False)
         self.btn_open_out_dir.setVisible(True)
 
         # 准确控制"查看待处理明细"状态
@@ -501,9 +608,7 @@ class ConvertPage(QWidget):
 
     @Slot(str)
     def _on_error(self, err_msg: str):
-        self.btn_start.setEnabled(True)
-        self.btn_add_files.setEnabled(True)
-        self.btn_clear_files.setEnabled(True)
+        self._set_ui_converting_state(False)
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "转换异常", err_msg)
 
@@ -531,3 +636,25 @@ class ConvertPage(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(target))
         else:
             QMessageBox.information(self, "提示", "所有点位均成功转换，未生成待处理明细文件！")
+
+    def cleanup_on_close(self):
+        """窗口关闭时的安全清理，杜绝 QThread 崩溃"""
+        self._preview_request_id += 1
+        self._current_preview_path = None
+        self._cancel_active_preview_workers()
+
+        for w in list(self._active_preview_workers):
+            try:
+                w.quit()
+                w.wait(200)
+            except Exception:
+                pass
+        self._active_preview_workers.clear()
+
+        if self.worker and self.worker.isRunning():
+            try:
+                self.worker.cancel()
+                self.worker.quit()
+                self.worker.wait(500)
+            except Exception:
+                pass

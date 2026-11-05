@@ -18,22 +18,32 @@ from core.history_manager import HistoryManager
 
 
 class PreviewWorker(QThread):
-    """异步数据预览读取线程，避免大文件阻塞界面"""
+    """异步数据预览读取线程，避免大文件阻塞界面并支持生命周期与请求标识安全管理"""
 
-    preview_done = Signal(str, list)  # (file_path, records)
-    preview_failed = Signal(str, str)  # (file_path, error_msg)
+    preview_done = Signal(int, str, list)  # (request_id, file_path, records)
+    preview_failed = Signal(int, str, str)  # (request_id, file_path, error_msg)
 
-    def __init__(self, file_path: str, allow_network: bool = False, parent=None):
+    def __init__(self, request_id: int, file_path: str, allow_network: bool = False, parent=None):
         super().__init__(parent)
+        self.request_id = request_id
         self.file_path = file_path
         self.allow_network = allow_network
+        self._is_cancelled = False
+
+    def cancel(self):
+        """标记取消，防止旧任务回调污染当前界面"""
+        self._is_cancelled = True
 
     def run(self):
         try:
+            if self._is_cancelled:
+                return
             records = TableReader.read_file(self.file_path, allow_network=self.allow_network)
-            self.preview_done.emit(self.file_path, records)
+            if not self._is_cancelled:
+                self.preview_done.emit(self.request_id, self.file_path, records)
         except Exception as e:
-            self.preview_failed.emit(self.file_path, str(e))
+            if not self._is_cancelled:
+                self.preview_failed.emit(self.request_id, self.file_path, str(e))
 
 
 class ConversionWorker(QThread):

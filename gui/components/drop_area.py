@@ -28,6 +28,7 @@ class FileDropWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("dropArea")
+        self._is_enabled = True
         self.setAcceptDrops(True)
         self.setCursor(QCursor(Qt.PointingHandCursor))
         self.setFixedHeight(72)
@@ -57,7 +58,18 @@ class FileDropWidget(QFrame):
 
         layout.addLayout(text_layout)
 
+    def set_enabled(self, enabled: bool):
+        """启用或禁用拖拽与点击选择功能"""
+        self._is_enabled = enabled
+        self.setAcceptDrops(enabled)
+        self.setCursor(QCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor))
+        if not enabled:
+            self.setStyleSheet("")
+
     def mousePressEvent(self, event):
+        if not self._is_enabled:
+            event.ignore()
+            return
         if event.button() == Qt.LeftButton:
             files, _ = QFileDialog.getOpenFileNames(
                 self,

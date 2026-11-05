@@ -176,3 +176,8 @@ class MainWindow(QMainWindow):
         else:
             self.btn_theme_toggle.setText("深色模式")
             self.btn_theme_toggle.setIcon(get_icon("theme", "#4B5563", 15))
+
+    def closeEvent(self, event):
+        """窗口关闭安全释放后台线程，杜绝 QThread 销毁异常"""
+        self.convert_page.cleanup_on_close()
+        super().closeEvent(event)
