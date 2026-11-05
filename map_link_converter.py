@@ -680,6 +680,13 @@ def run_batch_conversion(
     return summary
 
 
+def get_app_dir() -> str:
+    """获取程序所在的真实目录 (兼容 PyInstaller 打包环境)"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def prompt_gui_selection() -> Tuple[Optional[List[str]], Optional[str], Optional[str]]:
     """通过 Tkinter 标准文件对话框引导用户选择路径"""
     try:
@@ -700,12 +707,12 @@ def prompt_gui_selection() -> Tuple[Optional[List[str]], Optional[str], Optional
         filetypes=[("Excel 文件", "*.xlsx *.xls"), ("所有文件", "*.*")],
     )
     if not source_files:
-        print("用户取消了源文件选择，程序安全退出。")
+        print("用户取消了源文件选择，程序退出。")
         return None, None, None
 
-    # 2. 选择模板文件 (默认检查当前目录下是否有 导入模板*.xlsx)
+    # 2. 选择模板文件 (默认优先检查程序同级目录下是否有 导入模板*.xlsx)
     default_tpl = None
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    cur_dir = get_app_dir()
     for f in os.listdir(cur_dir):
         if f.startswith("导入模板") and f.endswith(".xlsx"):
             default_tpl = os.path.join(cur_dir, f)
@@ -719,7 +726,7 @@ def prompt_gui_selection() -> Tuple[Optional[List[str]], Optional[str], Optional
         filetypes=[("Excel 模板文件", "*.xlsx"), ("所有文件", "*.*")],
     )
     if not template_file:
-        print("用户取消了模板选择，程序安全退出。")
+        print("用户取消了模板选择，程序退出。")
         return None, None, None
 
     # 3. 选择输出目录
@@ -729,7 +736,7 @@ def prompt_gui_selection() -> Tuple[Optional[List[str]], Optional[str], Optional
         initialdir=os.path.dirname(source_files[0]),
     )
     if not output_dir:
-        print("用户取消了输出目录选择，程序安全退出。")
+        print("用户取消了输出目录选择，程序退出。")
         return None, None, None
 
     return list(source_files), template_file, output_dir
@@ -754,11 +761,15 @@ def main():
     template_path = args.template
     output_dir = args.output_dir
     allow_network = not args.offline
+    is_gui = False
 
     # 如果未提供必要命令行参数，自动进入 Tkinter 交互选择
     if not (source_files and template_path and output_dir):
+        is_gui = True
         gui_src, gui_tpl, gui_out = prompt_gui_selection()
         if not (gui_src and gui_tpl and gui_out):
+            if is_gui and sys.stdin and sys.stdin.isatty():
+                input("\n按回车键退出程序...")
             sys.exit(0)
         source_files = gui_src
         template_path = gui_tpl
@@ -768,10 +779,14 @@ def main():
     for sf in source_files:
         if not os.path.exists(sf):
             print(f"错误: 源文件不存在 -> {sf}")
+            if is_gui and sys.stdin and sys.stdin.isatty():
+                input("\n按回车键退出程序...")
             sys.exit(1)
 
     if not os.path.exists(template_path):
         print(f"错误: 模板文件不存在 -> {template_path}")
+        if is_gui and sys.stdin and sys.stdin.isatty():
+            input("\n按回车键退出程序...")
         sys.exit(1)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -785,8 +800,32 @@ def main():
 
     if summary["total_success"] == 0 and summary["total_records"] > 0:
         print("\n[警告] 本次处理的所有点位均未能成功解析，请查看待处理明细表！")
+        msg = f"处理完成，但所有 {summary['total_records']} 条点位均未成功解析。\n详情请查看待处理明细表！"
     elif summary["total_success"] > 0:
         print("\n[成功] 转换完成！结果已保存至输出目录。")
+        msg = (
+            f"转换完成！\n"
+            f"处理文件数: {summary['total_files']}\n"
+            f"识别总记录: {summary['total_records']}\n"
+            f"成功导入: {summary['total_success']} 条\n"
+            f"待处理: {summary['total_pending']} 条\n\n"
+            f"结果已保存至:\n{output_dir}"
+        )
+    else:
+        msg = "未发现任何有效记录。"
+
+    if is_gui:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            messagebox.showinfo("处理结果", msg)
+        except Exception:
+            pass
+        if sys.stdin and sys.stdin.isatty():
+            input("\n按回车键退出程序...")
 
 
 if __name__ == "__main__":
